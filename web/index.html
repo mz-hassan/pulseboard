@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <meta name="theme-color" content="#f3f0e8">
+  <meta name="description" content="Pulseboard — a fast, measurable collaborative canvas.">
+  <title>Pulseboard — collaborative canvas</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="app" class="app" aria-label="Pulseboard collaborative whiteboard">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Pulseboard home"><span class="brand-mark"></span><span>Pulseboard</span></a>
+      <div class="room-chip"><span class="muted">Room</span><strong id="room-label">—</strong></div>
+      <div class="top-actions">
+        <div id="presence" class="presence" aria-label="Active collaborators"></div>
+        <button id="invite" class="button button-secondary" type="button">Copy invite</button>
+        <div id="connection" class="connection offline"><span></span><b>Offline</b></div>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <aside class="toolbar" aria-label="Drawing tools">
+        <button class="tool active" id="pen" title="Pen (P)" aria-label="Pen">✎</button>
+        <button class="tool" id="eraser" title="Eraser (E)" aria-label="Eraser">⌫</button>
+        <div class="rule"></div>
+        <label class="color-wrap" title="Stroke color"><input id="color" type="color" value="#20221f" aria-label="Stroke color"><span></span></label>
+        <label class="width-wrap" title="Stroke width"><input id="width" type="range" min="1" max="20" value="4" aria-label="Stroke width"><span id="width-preview"></span></label>
+        <div class="rule"></div>
+        <button class="tool danger" id="clear" title="Clear board" aria-label="Clear board">×</button>
+      </aside>
+      <canvas id="board" aria-label="Shared drawing canvas"></canvas>
+      <div id="cursors" class="cursors" aria-hidden="true"></div>
+      <div class="canvas-note">Drag to draw · everyone here sees it live</div>
+    </section>
+  </main>
+
+  <div id="gate" class="gate">
+    <section class="gate-card" role="dialog" aria-modal="true" aria-labelledby="gate-title">
+      <div class="gate-brand"><span class="brand-mark"></span>Pulseboard</div>
+      <p class="eyebrow">A SHARED SURFACE</p>
+      <h1 id="gate-title">Ideas move faster<br>when the canvas does.</h1>
+      <p class="lede">Create a private room, draw together in real time, and pick up exactly where you left off.</p>
+      <label class="field"><span>Your display name</span><input id="display-name" maxlength="40" autocomplete="name" placeholder="e.g. Maya" autofocus></label>
+      <label id="room-field" class="field hidden"><span>Room ID</span><input id="room-input" maxlength="64" autocomplete="off" placeholder="design-critique"></label>
+      <label id="token-field" class="field hidden"><span>Room access token</span><input id="token-input" autocomplete="off" placeholder="Paste the invite token"></label>
+      <p id="gate-error" class="error" role="alert"></p>
+      <div class="gate-actions">
+        <button id="primary-action" class="button button-primary" type="button">Create a room</button>
+        <button id="toggle-mode" class="text-button" type="button">Join an existing room</button>
+      </div>
+      <div class="proof"><span>WebSocket live sync</span><span>Redis persistence</span><span>Private by link</span></div>
+    </section>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

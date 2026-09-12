@@ -1,0 +1,73 @@
+name: pulseboard
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      ROOM_TTL: ${ROOM_TTL:-168h}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
+      MAX_ROOM_USERS: ${MAX_ROOM_USERS:-250}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  redis:
+    image: redis:8.2-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    profiles: ["observability"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      app:
+        condition: service_healthy
+
+  k6:
+    image: grafana/k6:1.3.0
+    profiles: ["load"]
+    environment:
+      BASE_URL: http://app:8080
+      WS_URL: ws://app:8080
+      VUS: ${VUS:-100}
+      TEST_DURATION: ${TEST_DURATION:-30s}
+      OPS_PER_SECOND: ${OPS_PER_SECOND:-10}
+      ROOMS: ${ROOMS:-1}
+    volumes:
+      - ./load:/scripts:ro
+    command: ["run", "/scripts/collaboration.js"]
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  redis-data:
+  prometheus-data:
