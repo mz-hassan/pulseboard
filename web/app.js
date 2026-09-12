@@ -10,9 +10,10 @@
   function redraw(){ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);state.strokes.forEach(s=>line(s.points,s.color,s.width));state.remote.forEach(s=>line(s.points,s.color,s.width));if(state.drawing)line(state.drawing.points,state.drawing.color,state.drawing.width)}
   function point(e){const r=canvas.getBoundingClientRect();return{x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top))}}
   function op(type,data={}){if(!state.connected)return;const opId=crypto.randomUUID();state.pending.set(opId,performance.now());state.ws.send(JSON.stringify({type,opId,...data}))}
-  canvas.addEventListener('pointerdown',e=>{if(!state.connected)return;canvas.setPointerCapture(e.pointerId);const p=point(e),color=state.mode==='eraser'?'#f8f6ef':state.color,width=state.mode==='eraser'?22:state.width;state.drawing={id:crypto.randomUUID(),color,width,points:[p]};line([p],color,width);op('stroke:start',{strokeId:state.drawing.id,color,width,points:[p]})});
-  canvas.addEventListener('pointermove',e=>{const p=point(e);if(state.drawing){const prev=state.drawing.points.at(-1);state.drawing.points.push(p);line([prev,p],state.drawing.color,state.drawing.width);op('stroke:points',{strokeId:state.drawing.id,points:[p]})}if(state.connected&&performance.now()-state.cursorSent>33){state.cursorSent=performance.now();state.ws.send(JSON.stringify({type:'cursor',x:p.x,y:p.y}))}});
-  function endDraw(){if(!state.drawing)return;op('stroke:end',{strokeId:state.drawing.id});state.strokes.push(state.drawing);state.drawing=null}
+  canvas.addEventListener('pointerdown',e=>{if(!state.connected)return;canvas.setPointerCapture(e.pointerId);const p=point(e),color=state.mode==='eraser'?'#f8f6ef':state.color,width=state.mode==='eraser'?22:state.width;state.drawing={id:crypto.randomUUID(),color,width,points:[p],unsent:[],flushTimer:null};line([p],color,width);op('stroke:start',{strokeId:state.drawing.id,color,width,points:[p]})});
+  canvas.addEventListener('pointermove',e=>{const p=point(e);if(state.drawing){const prev=state.drawing.points.at(-1);state.drawing.points.push(p);state.drawing.unsent.push(p);line([prev,p],state.drawing.color,state.drawing.width);if(!state.drawing.flushTimer)state.drawing.flushTimer=setTimeout(flushDrawingPoints,33)}if(state.connected&&performance.now()-state.cursorSent>50){state.cursorSent=performance.now();state.ws.send(JSON.stringify({type:'cursor',x:p.x,y:p.y}))}});
+  function flushDrawingPoints(){const drawing=state.drawing;if(!drawing)return;clearTimeout(drawing.flushTimer);drawing.flushTimer=null;while(drawing.unsent.length)op('stroke:points',{strokeId:drawing.id,points:drawing.unsent.splice(0,128)})}
+  function endDraw(){if(!state.drawing)return;flushDrawingPoints();op('stroke:end',{strokeId:state.drawing.id});delete state.drawing.unsent;delete state.drawing.flushTimer;state.strokes.push(state.drawing);state.drawing=null}
   canvas.addEventListener('pointerup',endDraw);canvas.addEventListener('pointercancel',endDraw);
 
   function connect(isReconnect=false){
@@ -21,7 +22,7 @@
     const ws=new WebSocket(`${protocol}://${location.host}/ws/${encodeURIComponent(state.room)}?${q}`);state.ws=ws;
     ws.onopen=()=>{state.connected=true;state.reconnects=0;setConnection('online','Live');$('gate').classList.add('hidden')};
     ws.onmessage=e=>{let msg;try{msg=JSON.parse(e.data)}catch{return}handle(msg)};
-    ws.onclose=()=>{state.connected=false;setConnection('offline','Offline');if(state.room){const wait=Math.min(1000*2**state.reconnects++,10000);fetch('/api/metrics/reconnect-attempt',{method:'POST'}).catch(()=>{});state.reconnectTimer=setTimeout(()=>connect(true),wait)}};
+    ws.onclose=()=>{state.connected=false;setConnection('offline','Offline');if(state.room){const base=Math.min(750*2**state.reconnects++,15000),wait=base*(0.5+Math.random());fetch('/api/metrics/reconnect-attempt',{method:'POST'}).catch(()=>{});state.reconnectTimer=setTimeout(()=>connect(true),wait)}};
     ws.onerror=()=>ws.close();
   }
   function handle(msg){

@@ -7,11 +7,15 @@ const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const WS_URL = __ENV.WS_URL || BASE_URL.replace(/^http/, 'ws');
 const VUS = Number(__ENV.VUS || 100);
 const DURATION = __ENV.TEST_DURATION || '30s';
-const OPS = Math.max(1, Number(__ENV.OPS_PER_SECOND || 10));
+const OPS = Math.max(1, Number(__ENV.OPS_PER_SECOND || 10)); // Used only by MODEL=stress.
 const ROOM_COUNT = Math.max(1, Number(__ENV.ROOMS || 1));
 const CONNECTION_LIFETIME = __ENV.CONNECTION_LIFETIME || '45s';
 const RUN_ID = __ENV.RUN_ID || `run-${Date.now()}`;
 const RECONNECT_MODE = (__ENV.RECONNECT_MODE || 'false') === 'true';
+const MODEL = __ENV.MODEL || 'realistic';
+const ACTIVE_USER_FRACTION = clamp(Number(__ENV.ACTIVE_USER_FRACTION || 0.25), 0, 1);
+const ACTIVE_STROKES_PER_SECOND = Math.max(0.01, Number(__ENV.ACTIVE_STROKES_PER_SECOND || 0.35));
+const CURSOR_UPDATES_PER_SECOND = Math.max(0, Number(__ENV.CURSOR_UPDATES_PER_SECOND || 0.5));
 
 const strokeLatency = new Trend('stroke_round_trip_ms', true);
 const operations = new Counter('drawing_operations');
@@ -54,13 +58,17 @@ export default function (data) {
       if (reconnecting) reconnectSuccess.add(true);
       connectedBefore = true;
       let sequence = 0;
-      socket.setInterval(() => {
-        const strokeId = `s_${__VU}_${__ITER}_${sequence++}`;
-        const { start, points, color, width } = realisticStroke(random);
-        send(socket, pending, 'stroke:start', strokeId, [start], color, width);
-        send(socket, pending, 'stroke:points', strokeId, points, color, width);
-        send(socket, pending, 'stroke:end', strokeId);
-      }, 1000 / OPS);
+      if (MODEL === 'stress') {
+        socket.setInterval(() => {
+          const strokeId = `s_${__VU}_${__ITER}_${sequence++}`;
+          const { start, points, color, width } = realisticStroke(random);
+          send(socket, pending, 'stroke:start', strokeId, [start], color, width);
+          send(socket, pending, 'stroke:points', strokeId, points, color, width);
+          send(socket, pending, 'stroke:end', strokeId);
+        }, 1000 / OPS);
+      } else {
+        simulateHumanSession(socket, pending, random, () => `s_${__VU}_${__ITER}_${sequence++}`);
+      }
     });
     socket.on('message', raw => {
       let msg; try { msg = JSON.parse(raw) } catch (_) { return }
@@ -75,6 +83,45 @@ export default function (data) {
   });
   check(response, { 'websocket upgraded': r => r && r.status === 101 });
 }
+
+// Models a board participant instead of a continuously drawing robot. A
+// stable subset is active; their stroke starts follow a Poisson process, so a
+// person may draw in one second and be idle for several later seconds.
+function simulateHumanSession(socket, pending, random, nextStrokeID) {
+  const tickMs = 100;
+  const isActive = random() < ACTIVE_USER_FRACTION;
+  let activeStroke = null;
+  let cursorX = 30 + random() * 1100;
+  let cursorY = 30 + random() * 650;
+  socket.setInterval(() => {
+    const now = Date.now();
+    if (!activeStroke && isActive && random() < poissonChance(ACTIVE_STROKES_PER_SECOND, tickMs)) {
+      const stroke = realisticStroke(random);
+      activeStroke = { ...stroke, id: nextStrokeID(), index: 0, nextPointAt: now + 60 + random() * 100, endsAt: now + 350 + random() * 900 };
+      send(socket, pending, 'stroke:start', activeStroke.id, [stroke.start], stroke.color, stroke.width);
+    }
+    if (activeStroke && now >= activeStroke.nextPointAt) {
+      const remaining = activeStroke.points.length - activeStroke.index;
+      const pointsThisTick = Math.min(remaining, 1 + Math.floor(random() * 3));
+      const points = activeStroke.points.slice(activeStroke.index, activeStroke.index + pointsThisTick);
+      activeStroke.index += points.length;
+      send(socket, pending, 'stroke:points', activeStroke.id, points, activeStroke.color, activeStroke.width);
+      activeStroke.nextPointAt = now + 40 + random() * 90;
+      if (activeStroke.index >= activeStroke.points.length || now >= activeStroke.endsAt) {
+        send(socket, pending, 'stroke:end', activeStroke.id);
+        activeStroke = null;
+      }
+    }
+    if (CURSOR_UPDATES_PER_SECOND > 0 && random() < poissonChance(CURSOR_UPDATES_PER_SECOND, tickMs)) {
+      cursorX = clamp(cursorX + (random() - 0.5) * 80, 0, 1200);
+      cursorY = clamp(cursorY + (random() - 0.5) * 80, 0, 700);
+      socket.send(JSON.stringify({ type: 'cursor', x: cursorX, y: cursorY }));
+    }
+  }, tickMs);
+}
+
+function poissonChance(ratePerSecond, intervalMs) { return 1 - Math.exp(-ratePerSecond * intervalMs / 1000); }
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 
 function durationMs(value) {
   const match = String(value).match(/^(\d+(?:\.\d+)?)(ms|s|m)$/);

@@ -11,6 +11,8 @@ run() {
   echo "[$(date -u +%FT%TZ)] $name" | tee "$RESULTS/${name}.log"
   if docker run --rm --network host --user "$(id -u):$(id -g)" -v "$PWD/load:/scripts:ro" -v "$RESULTS:/results" \
     -e BASE_URL="$SERVER_URL" -e WS_URL="$WS_URL" -e RUN_ID="$name-$(date +%s)" \
+    -e MODEL="${MODEL:-realistic}" -e ACTIVE_USER_FRACTION="${ACTIVE_USER_FRACTION:-0.25}" \
+    -e ACTIVE_STROKES_PER_SECOND="${ACTIVE_STROKES_PER_SECOND:-0.35}" -e CURSOR_UPDATES_PER_SECOND="${CURSOR_UPDATES_PER_SECOND:-0.5}" \
     "$@" grafana/k6:1.3.0 run --quiet --summary-export "/results/${name}.json" /scripts/collaboration.js \
     > "$RESULTS/${name}.log" 2>&1; then
     cat "$RESULTS/${name}.log"

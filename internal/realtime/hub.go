@@ -9,6 +9,7 @@ import (
 )
 
 var ErrRoomFull = errors.New("room is at capacity")
+var ErrServerFull = errors.New("server is at connection capacity")
 
 type Peer struct {
 	ID    string `json:"id"`
@@ -28,8 +29,10 @@ type Hub struct {
 	register           chan registration
 	unregister         chan *Client
 	broadcast          chan envelope
+	ephemeral          chan envelope
 	rooms              map[string]map[*Client]struct{}
 	maxRoomUsers       int
+	maxConnections     int
 	metrics            *appmetrics.Metrics
 	once               sync.Once
 	currentConnections int
@@ -37,8 +40,8 @@ type Hub struct {
 	roomPeaks          map[string]int
 }
 
-func NewHub(maxRoomUsers int, metrics *appmetrics.Metrics) *Hub {
-	return &Hub{register: make(chan registration), unregister: make(chan *Client), broadcast: make(chan envelope, 4096), rooms: make(map[string]map[*Client]struct{}), maxRoomUsers: maxRoomUsers, metrics: metrics, roomPeaks: make(map[string]int)}
+func NewHub(maxRoomUsers, maxConnections int, metrics *appmetrics.Metrics) *Hub {
+	return &Hub{register: make(chan registration), unregister: make(chan *Client), broadcast: make(chan envelope, 8192), ephemeral: make(chan envelope, 2048), rooms: make(map[string]map[*Client]struct{}), maxRoomUsers: maxRoomUsers, maxConnections: maxConnections, metrics: metrics, roomPeaks: make(map[string]int)}
 }
 func (h *Hub) Start() { h.once.Do(func() { go h.run() }) }
 func (h *Hub) Register(c *Client) error {
@@ -49,6 +52,18 @@ func (h *Hub) Register(c *Client) error {
 func (h *Hub) Unregister(c *Client) { h.unregister <- c }
 func (h *Hub) Broadcast(roomID string, payload []byte) {
 	h.broadcast <- envelope{roomID: roomID, payload: payload}
+	h.metrics.BroadcastQueueDepth.Set(float64(len(h.broadcast)))
+}
+func (h *Hub) BroadcastEphemeralJSON(roomID string, value any) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	select {
+	case h.ephemeral <- envelope{roomID: roomID, payload: payload}:
+	default:
+		h.metrics.EphemeralDrops.Inc()
+	}
 }
 func (h *Hub) BroadcastJSON(roomID string, value any) {
 	if payload, err := json.Marshal(value); err == nil {
@@ -61,7 +76,13 @@ func (h *Hub) run() {
 		select {
 		case reg := <-h.register:
 			room := h.rooms[reg.client.RoomID]
+			if h.currentConnections >= h.maxConnections {
+				h.metrics.RejectedConnections.WithLabelValues("server_full").Inc()
+				reg.result <- ErrServerFull
+				continue
+			}
 			if len(room) >= h.maxRoomUsers {
+				h.metrics.RejectedConnections.WithLabelValues("room_full").Inc()
 				reg.result <- ErrRoomFull
 				continue
 			}
@@ -111,6 +132,9 @@ func (h *Hub) run() {
 				h.broadcastRoom(client.RoomID, mustJSON(map[string]any{"type": "presence:leave", "userId": client.ID}))
 			}
 		case msg := <-h.broadcast:
+			h.metrics.BroadcastQueueDepth.Set(float64(len(h.broadcast)))
+			h.broadcastRoom(msg.roomID, msg.payload)
+		case msg := <-h.ephemeral:
 			h.broadcastRoom(msg.roomID, msg.payload)
 		}
 	}

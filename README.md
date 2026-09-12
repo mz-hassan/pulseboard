@@ -69,6 +69,10 @@ Useful PromQL queries:
 | CPU cores consumed | `rate(process_cpu_seconds_total[1m])` |
 | Resident memory | `process_resident_memory_bytes` |
 | Backpressure failures | `rate(whiteboard_dropped_messages_total[1m])` |
+| Rejected overload connections | `sum by (reason) (rate(whiteboard_rejected_connections_total[1m]))` |
+| Snapshot cache hit ratio | `rate(whiteboard_snapshot_cache_hits_total[5m]) / (rate(whiteboard_snapshot_cache_hits_total[5m]) + rate(whiteboard_snapshot_cache_misses_total[5m]))` |
+| Durable broadcast backlog | `whiteboard_broadcast_queue_depth` |
+| Ephemeral cursor drops | `rate(whiteboard_ephemeral_messages_dropped_total[1m])` |
 
 Round-trip latency is measured at the browser/load client: it timestamps each drawing operation, waits until the server-broadcast copy returns, and submits the observation over the existing socket. This captures client → server → room hub → client latency without relying on synchronized clocks.
 
@@ -85,7 +89,9 @@ VUS=500 ROOMS=5 OPS_PER_SECOND=4 TEST_DURATION=2m \
   docker compose --profile load run --rm k6
 ```
 
-`OPS_PER_SECOND` means strokes per second; each stroke produces three protocol operations (`start`, `points`, `end`). The k6 summary reports `stroke_round_trip_ms` p50/p95/p99, `drawing_operations`, WebSocket success, reconnection success, and throughput.
+In `MODEL=stress`, `OPS_PER_SECOND` means strokes per second and every client draws continuously. In the default realistic model, the activity probability settings control traffic instead. The k6 summary reports `stroke_round_trip_ms` p50/p95/p99, `drawing_operations`, WebSocket success, reconnection success, and throughput.
+
+The default `MODEL=realistic` is intended for product-capacity testing: 25% of connected users are active, active users start strokes at a randomized average of 0.35 strokes/second, each stroke unfolds over 0.35-1.25 seconds, and cursors move occasionally. These are configurable with `ACTIVE_USER_FRACTION`, `ACTIVE_STROKES_PER_SECOND`, and `CURSOR_UPDATES_PER_SECOND`. Use `MODEL=stress OPS_PER_SECOND=...` only to deliberately find overload behavior; it makes every client draw continuously and should not be presented as normal usage.
 
 Run a concurrency sweep and retain both k6 summaries and `/metrics` snapshots:
 

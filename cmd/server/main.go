@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/example/pulseboard/internal/boardcache"
 	"github.com/example/pulseboard/internal/config"
 	appmetrics "github.com/example/pulseboard/internal/metrics"
 	"github.com/example/pulseboard/internal/realtime"
@@ -27,22 +28,25 @@ import (
 var roomPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{3,64}$`)
 
 type application struct {
-	cfg     config.Config
-	store   *store.RedisStore
-	hub     *realtime.Hub
-	metrics *appmetrics.Metrics
+	cfg          config.Config
+	store        *store.RedisStore
+	hub          *realtime.Hub
+	metrics      *appmetrics.Metrics
+	snapshots    *boardcache.Cache
+	restoreSlots chan struct{}
 }
 
 func main() {
 	cfg := config.Load()
-	redisStore := store.NewRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RoomTTL)
+	redisStore := store.NewRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RoomTTL, cfg.MaxStrokesPerRoom)
 	defer redisStore.Close()
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
 	metrics := appmetrics.New(registry)
-	hub := realtime.NewHub(cfg.MaxRoomUsers, metrics)
+	snapshots := boardcache.New(redisStore, cfg.SnapshotCacheTTL, cfg.MaxStrokesPerRoom, cfg.SnapshotCacheMaxBytes)
+	hub := realtime.NewHub(cfg.MaxRoomUsers, cfg.MaxConnections, metrics)
 	hub.Start()
-	app := &application{cfg: cfg, store: redisStore, hub: hub, metrics: metrics}
+	app := &application{cfg: cfg, store: redisStore, hub: hub, metrics: metrics, snapshots: snapshots, restoreSlots: make(chan struct{}, cfg.MaxConcurrentRestores)}
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /healthz", app.health)
@@ -108,6 +112,7 @@ func (a *application) clearRoom(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "could not clear board")
 		return
 	}
+	a.snapshots.Clear(roomID)
 	a.hub.BroadcastJSON(roomID, map[string]string{"type": "board:clear"})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -129,26 +134,43 @@ func (a *application) websocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	strokes, err := a.store.LoadStrokes(ctx, roomID)
+	select {
+	case a.restoreSlots <- struct{}{}:
+		defer func() { <-a.restoreSlots }()
+	default:
+		a.metrics.RejectedConnections.WithLabelValues("restore_busy").Inc()
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "board restore busy; retry shortly")
+		cancel()
+		return
+	}
+	statePayload, cacheHit, err := a.snapshots.State(ctx, roomID)
+	if err == nil {
+		if cacheHit {
+			a.metrics.SnapshotCacheHits.Inc()
+		} else {
+			a.metrics.SnapshotCacheMisses.Inc()
+		}
+	}
 	cancel()
 	if err != nil {
 		a.metrics.PersistenceErrors.Inc()
 		writeError(w, 503, "board state unavailable")
 		return
 	}
-	upgrader := realtime.Upgrader(a.cfg.AllowedOrigins)
+	upgrader := realtime.Upgrader(a.cfg.AllowedOrigins, a.cfg.EnableCompression)
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	conn.SetReadLimit(a.cfg.MaxMessageBytes)
-	client := realtime.NewClient(realtime.Peer{ID: userID, Name: name, Color: color}, roomID, conn, a.hub, a.store, a.metrics, a.cfg.WriteWait, a.cfg.PongWait)
+	client := realtime.NewClient(realtime.Peer{ID: userID, Name: name, Color: color}, roomID, conn, a.hub, a.store, a.metrics, a.cfg.WriteWait, a.cfg.PongWait, a.snapshots.Append)
 	if err = a.hub.Register(client); err != nil {
 		_ = conn.WriteControl(8, []byte("room full"), time.Now().Add(time.Second))
 		_ = conn.Close()
 		return
 	}
-	client.EnqueueJSON(map[string]any{"type": "board:state", "strokes": strokes})
+	client.Enqueue(statePayload)
 	if r.URL.Query().Get("reconnect") == "1" {
 		a.metrics.ReconnectSuccesses.Inc()
 	}

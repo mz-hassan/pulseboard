@@ -19,15 +19,16 @@ const maxPointsPerStroke = 20000
 
 type Client struct {
 	Peer
-	RoomID     string
-	conn       *websocket.Conn
-	send       chan []byte
-	hub        *Hub
-	store      store.BoardStore
-	metrics    *appmetrics.Metrics
-	writeWait  time.Duration
-	pongWait   time.Duration
-	inProgress map[string]*store.Stroke
+	RoomID      string
+	conn        *websocket.Conn
+	send        chan []byte
+	hub         *Hub
+	store       store.BoardStore
+	metrics     *appmetrics.Metrics
+	writeWait   time.Duration
+	pongWait    time.Duration
+	inProgress  map[string]*store.Stroke
+	onPersisted func(string, store.Stroke)
 }
 
 type incoming struct {
@@ -42,17 +43,20 @@ type incoming struct {
 	LatencyMS float64       `json:"latencyMs,omitempty"`
 }
 
-func NewClient(peer Peer, roomID string, conn *websocket.Conn, hub *Hub, boardStore store.BoardStore, metrics *appmetrics.Metrics, writeWait, pongWait time.Duration) *Client {
-	return &Client{Peer: peer, RoomID: roomID, conn: conn, send: make(chan []byte, 256), hub: hub, store: boardStore, metrics: metrics, writeWait: writeWait, pongWait: pongWait, inProgress: make(map[string]*store.Stroke)}
+func NewClient(peer Peer, roomID string, conn *websocket.Conn, hub *Hub, boardStore store.BoardStore, metrics *appmetrics.Metrics, writeWait, pongWait time.Duration, onPersisted func(string, store.Stroke)) *Client {
+	return &Client{Peer: peer, RoomID: roomID, conn: conn, send: make(chan []byte, 256), hub: hub, store: boardStore, metrics: metrics, writeWait: writeWait, pongWait: pongWait, inProgress: make(map[string]*store.Stroke), onPersisted: onPersisted}
+}
+func (c *Client) Enqueue(payload []byte) {
+	select {
+	case c.send <- payload:
+	default:
+		c.metrics.DroppedMessages.Inc()
+	}
 }
 func (c *Client) EnqueueJSON(value any) {
 	payload, err := json.Marshal(value)
 	if err == nil {
-		select {
-		case c.send <- payload:
-		default:
-			c.metrics.DroppedMessages.Inc()
-		}
+		c.Enqueue(payload)
 	}
 }
 
@@ -108,6 +112,8 @@ func (c *Client) handle(msg incoming) bool {
 		if err := c.store.SaveStroke(ctx, c.RoomID, *stroke); err != nil {
 			c.metrics.PersistenceErrors.Inc()
 			slog.Error("save stroke", "error", err, "room", c.RoomID)
+		} else if c.onPersisted != nil {
+			c.onPersisted(c.RoomID, *stroke)
 		}
 		c.broadcastOperation(msg)
 		return true
@@ -115,7 +121,7 @@ func (c *Client) handle(msg incoming) bool {
 		if !finite(msg.X) || !finite(msg.Y) {
 			return false
 		}
-		c.hub.BroadcastJSON(c.RoomID, map[string]any{"type": "cursor", "userId": c.ID, "x": msg.X, "y": msg.Y})
+		c.hub.BroadcastEphemeralJSON(c.RoomID, map[string]any{"type": "cursor", "userId": c.ID, "x": msg.X, "y": msg.Y})
 		return true
 	case "latency":
 		if msg.LatencyMS >= 0 && msg.LatencyMS < 60000 {
@@ -147,6 +153,8 @@ func (c *Client) persistInProgress() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		if err := c.store.SaveStroke(ctx, c.RoomID, *stroke); err != nil {
 			c.metrics.PersistenceErrors.Inc()
+		} else if c.onPersisted != nil {
+			c.onPersisted(c.RoomID, *stroke)
 		}
 		cancel()
 	}
@@ -201,8 +209,8 @@ func validPoints(points []store.Point) bool {
 }
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
-func Upgrader(origins map[string]struct{}) websocket.Upgrader {
-	return websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096, EnableCompression: true, CheckOrigin: func(r *http.Request) bool {
+func Upgrader(origins map[string]struct{}, enableCompression bool) websocket.Upgrader {
+	return websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096, EnableCompression: enableCompression, CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			return true

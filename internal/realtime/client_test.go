@@ -32,7 +32,7 @@ func TestValidation(t *testing.T) {
 func TestHubEnforcesCapacityAndRecordsPeaks(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	metrics := appmetrics.New(registry)
-	hub := NewHub(2, metrics)
+	hub := NewHub(2, 10, metrics)
 	hub.Start()
 	first := &Client{Peer: Peer{ID: "one"}, RoomID: "room", send: make(chan []byte, 8)}
 	second := &Client{Peer: Peer{ID: "two"}, RoomID: "room", send: make(chan []byte, 8)}
@@ -65,4 +65,20 @@ func TestHubEnforcesCapacityAndRecordsPeaks(t *testing.T) {
 	}
 	hub.Unregister(first)
 	hub.Unregister(second)
+}
+
+func TestHubEnforcesGlobalCapacity(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := appmetrics.New(registry)
+	hub := NewHub(10, 1, metrics)
+	hub.Start()
+	first := &Client{Peer: Peer{ID: "one"}, RoomID: "room-a", send: make(chan []byte, 8)}
+	second := &Client{Peer: Peer{ID: "two"}, RoomID: "room-b", send: make(chan []byte, 8)}
+	if err := hub.Register(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Register(second); err != ErrServerFull {
+		t.Fatalf("expected ErrServerFull, got %v", err)
+	}
+	hub.Unregister(first)
 }

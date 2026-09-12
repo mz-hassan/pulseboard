@@ -40,12 +40,13 @@ type BoardStore interface {
 }
 
 type RedisStore struct {
-	client *redis.Client
-	ttl    time.Duration
+	client     *redis.Client
+	ttl        time.Duration
+	maxStrokes int64
 }
 
-func NewRedis(addr, password string, ttl time.Duration) *RedisStore {
-	return &RedisStore{client: redis.NewClient(&redis.Options{Addr: addr, Password: password}), ttl: ttl}
+func NewRedis(addr, password string, ttl time.Duration, maxStrokes int) *RedisStore {
+	return &RedisStore{client: redis.NewClient(&redis.Options{Addr: addr, Password: password}), ttl: ttl, maxStrokes: int64(maxStrokes)}
 }
 func (s *RedisStore) Close() error                   { return s.client.Close() }
 func (s *RedisStore) Ping(ctx context.Context) error { return s.client.Ping(ctx).Err() }
@@ -88,7 +89,7 @@ func (s *RedisStore) Authorize(ctx context.Context, roomID, token string) error 
 	return nil
 }
 func (s *RedisStore) LoadStrokes(ctx context.Context, roomID string) ([]Stroke, error) {
-	items, err := s.client.LRange(ctx, "room:"+roomID+":strokes", 0, -1).Result()
+	items, err := s.client.LRange(ctx, "room:"+roomID+":strokes", -s.maxStrokes, -1).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +110,7 @@ func (s *RedisStore) SaveStroke(ctx context.Context, roomID string, stroke Strok
 	key := "room:" + roomID + ":strokes"
 	pipe := s.client.TxPipeline()
 	pipe.RPush(ctx, key, payload)
+	pipe.LTrim(ctx, key, -s.maxStrokes, -1)
 	pipe.Expire(ctx, key, s.ttl)
 	pipe.Expire(ctx, "room:"+roomID+":meta", s.ttl)
 	_, err = pipe.Exec(ctx)
