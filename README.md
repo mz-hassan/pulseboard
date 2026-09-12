@@ -96,6 +96,12 @@ LEVELS="50 100 250 500 1000" TEST_DURATION=1m OPS_PER_SECOND=5 ./load/sweep.sh
 
 Results are written under `load/results/<UTC timestamp>/` and ignored by Git. Define “maximum sustained” before publishing a resume number—for example: the highest level completing a two-minute run with p95 under 150 ms, p99 under 300 ms, connection success above 99%, zero dropped messages, and no container restart. Record the machine CPU/RAM and Docker CPU/memory limit alongside the result.
 
+### Isolated benchmark suite
+
+For a reproducible cloud run, deploy the service on one VM and run k6 from a second VM. `load/run-remote-suite.sh` runs a 10-user smoke check, an escalating single-room sweep, a multi-room comparison, and a forced-reconnection workload. It stops the room sweep after the first failed latency or success-rate threshold. The workload varies each stroke's position, length, direction, color, width, and number of points; it uses deterministic per-VU pseudo-randomness so a failed run can be reproduced.
+
+Run `load/capture-server-stats.sh RESULTS_DIR` on the server during the suite. It writes five-second `docker-stats.csv` samples and Prometheus snapshots. k6 writes a per-run console log and machine-readable summary JSON. Preserve these files, plus `docker compose logs`, as the evidence for reported results.
+
 ## Development and operations
 
 ```bash
