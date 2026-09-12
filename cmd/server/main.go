@@ -136,7 +136,6 @@ func (a *application) websocket(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	select {
 	case a.restoreSlots <- struct{}{}:
-		defer func() { <-a.restoreSlots }()
 	default:
 		a.metrics.RejectedConnections.WithLabelValues("restore_busy").Inc()
 		w.Header().Set("Retry-After", "1")
@@ -145,6 +144,11 @@ func (a *application) websocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statePayload, cacheHit, err := a.snapshots.State(ctx, roomID)
+	// The limiter protects the persistence read, not the lifetime of the
+	// WebSocket. Holding a slot until ReadPump returns caps long-lived
+	// connections at MaxConcurrentRestores and turns excess clients into a
+	// retry storm.
+	<-a.restoreSlots
 	if err == nil {
 		if cacheHit {
 			a.metrics.SnapshotCacheHits.Inc()
