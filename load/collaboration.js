@@ -21,12 +21,16 @@ const strokeLatency = new Trend('stroke_round_trip_ms', true);
 const operations = new Counter('drawing_operations');
 const reconnectSuccess = new Rate('reconnection_success');
 const socketSuccess = new Rate('websocket_connection_success');
+const upgradeSuccess = new Rate('websocket_upgrade_success');
+const sessionStability = new Rate('websocket_session_stability');
 const connectionLifetime = new Trend('websocket_connection_lifetime_ms', true);
+const expectedLifetimeMs = durationMs(CONNECTION_LIFETIME);
 
 export const options = {
   scenarios: { collaboration: { executor: 'constant-vus', vus: VUS, duration: DURATION, gracefulStop: '5s' } },
   thresholds: {
-    websocket_connection_success: ['rate>0.99'],
+    websocket_upgrade_success: ['rate>0.99'],
+    websocket_session_stability: ['rate>0.99'],
     reconnection_success: ['rate>0.95'],
     stroke_round_trip_ms: ['p(95)<150', 'p(99)<300'],
   },
@@ -78,10 +82,16 @@ export default function (data) {
       }
     });
     socket.on('error', () => { socketSuccess.add(false); if (reconnecting) reconnectSuccess.add(false) });
-    socket.on('close', () => connectionLifetime.add(Date.now() - openedAt));
-    socket.setTimeout(() => socket.close(), durationMs(CONNECTION_LIFETIME));
+    socket.on('close', () => {
+      const lifetime = Date.now() - openedAt;
+      connectionLifetime.add(lifetime);
+      sessionStability.add(lifetime >= expectedLifetimeMs * 0.9);
+    });
+    socket.setTimeout(() => socket.close(), expectedLifetimeMs);
   });
-  check(response, { 'websocket upgraded': r => r && r.status === 101 });
+  const upgraded = Boolean(response && response.status === 101);
+  upgradeSuccess.add(upgraded);
+  check(response, { 'websocket upgraded': () => upgraded });
 }
 
 // Models a board participant instead of a continuously drawing robot. A
